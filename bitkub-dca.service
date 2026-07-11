@@ -1,0 +1,20 @@
+[Unit]
+Description=Bitkub DCA Bot - Daily Bitcoin DCA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/bitkub-dca
+ExecStart=/home/pi/bitkub-dca/venv/bin/python /home/pi/bitkub-dca/dca_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/pi/bitkub-dca/service.log
+StandardError=append:/home/pi/bitkub-dca/service.log
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

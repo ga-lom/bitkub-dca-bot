@@ -30,9 +30,13 @@
 
 ```
 .
-├── dca_bot.py
+├── dca_bot.py            # โปรแกรมหลัก
+├── test_connection.py    # สคริปต์ทดสอบ API ก่อนใช้งานจริง
 ├── requirements.txt
 ├── .env.example
+├── bitkub-dca.service    # systemd service (สำหรับ Raspberry Pi / Linux)
+├── install.sh            # สคริปต์ติดตั้งอัตโนมัติบน Raspberry Pi
+├── uninstall.sh          # สคริปต์ถอนการติดตั้ง
 └── README.md
 ```
 
@@ -142,6 +146,40 @@ python dca_bot.py
 ```text
 Ctrl + C
 ```
+
+---
+
+## 4) ติดตั้งบน Raspberry Pi แบบ systemd service (รัน 24/7 อัตโนมัติ)
+
+ติดตั้งลง `/home/pi/bitkub-dca` พร้อม service ที่รีสตาร์ทเองเมื่อล่มและเริ่มอัตโนมัติเมื่อบูท:
+
+```bash
+git clone https://github.com/ga-lom/bitkub-dca-bot.git
+cd bitkub-dca-bot
+chmod +x install.sh
+./install.sh
+
+# ใส่ API key
+nano /home/pi/bitkub-dca/.env
+
+# ทดสอบ API ก่อนเริ่มใช้งานจริง
+cd /home/pi/bitkub-dca
+source venv/bin/activate
+python test_connection.py
+deactivate
+
+# เริ่ม service
+sudo systemctl start bitkub-dca
+sudo systemctl enable bitkub-dca
+```
+
+ดู log:
+```bash
+journalctl -u bitkub-dca -f
+tail -f /home/pi/bitkub-dca/dca_bot.log
+```
+
+ถอนการติดตั้ง: `./uninstall.sh`
 
 ---
 
