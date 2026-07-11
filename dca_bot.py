@@ -9,6 +9,7 @@ import hashlib
 import requests
 import schedule
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -23,6 +24,8 @@ DCA_AMOUNT = float(os.getenv("DCA_AMOUNT_THB", 100))
 DCA_TIME = os.getenv("DCA_TIME", "09:00")
 SYMBOL = os.getenv("SYMBOL", "btc_thb").lower()
 REQUEST_TIMEOUT = (5, 15)  # (connect, read) seconds — no timeout hangs the scheduler forever
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 120
 
 # Get script directory for log file
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +36,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -62,12 +65,24 @@ def get_headers(timestamp: int, signature: str) -> dict:
     }
 
 
+def get_server_timestamp() -> int:
+    """
+    Server time in ms for request signing — a drifted local clock causes
+    signature errors (error 6). Falls back to local time if unreachable.
+    """
+    try:
+        response = requests.get(f"{BASE_URL}/api/v3/servertime", timeout=REQUEST_TIMEOUT)
+        return int(response.json())
+    except Exception:
+        return int(time.time() * 1000)
+
+
 def get_wallet_balances() -> dict:
     """
     Get available balances as {currency: amount} via GET /api/v4/wallet/balances
     (POST /api/v3/market/wallet is deprecated). Raises on API error.
     """
-    timestamp = int(time.time() * 1000)
+    timestamp = get_server_timestamp()
     method = "GET"
     path = "/api/v4/wallet/balances"
 
@@ -84,19 +99,12 @@ def get_wallet_balances() -> dict:
 
 
 def get_ticker() -> dict:
-    """Get current ticker price for BTC"""
-    response = requests.get(f"{BASE_URL}/api/v3/market/ticker", timeout=REQUEST_TIMEOUT)
+    """Get current ticker for the configured symbol"""
+    response = requests.get(f"{BASE_URL}/api/v3/market/ticker", params={"sym": SYMBOL}, timeout=REQUEST_TIMEOUT)
     data = response.json()
 
-    # Handle list response
-    if isinstance(data, list):
-        for item in data:
-            sym = item.get("symbol", "")
-            if "BTC" in sym:
-                return {"THB_BTC": item}
-    # Handle dict response
-    elif isinstance(data, dict):
-        return data
+    if isinstance(data, list) and data:
+        return data[0]
     return {}
 
 
@@ -105,14 +113,17 @@ def place_market_buy_order(amount_thb: float) -> dict:
     Place a market buy order for Bitcoin
     amount_thb: Amount in THB to spend
     """
-    timestamp = int(time.time() * 1000)
+    timestamp = get_server_timestamp()
     method = "POST"
     path = "/api/v3/market/place-bid"
+
+    # API spec rejects trailing zeros (e.g. 100.0) — send int when whole
+    amt = int(amount_thb) if float(amount_thb).is_integer() else round(amount_thb, 2)
 
     # Payload for market order (use lowercase format like btc_thb)
     payload_dict = {
         "sym": SYMBOL,
-        "amt": amount_thb,
+        "amt": amt,
         "rat": 0,  # 0 for market order
         "typ": "market"
     }
@@ -129,13 +140,20 @@ def place_market_buy_order(amount_thb: float) -> dict:
 
 def execute_dca():
     """
-    Execute DCA buy order. Must never raise — an exception would propagate
-    through schedule.run_pending() and kill the whole scheduler loop.
+    Execute DCA buy order with retries. Must never raise — an exception would
+    propagate through schedule.run_pending() and kill the whole scheduler loop.
+    Only failures before the order is sent are retried; a failed order request
+    is not retried to avoid a double buy.
     """
-    try:
-        _execute_dca()
-    except Exception:
-        logger.exception("DCA execution failed")
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            _execute_dca()
+            return
+        except Exception:
+            logger.exception(f"DCA execution failed (attempt {attempt}/{MAX_RETRIES})")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY_SECONDS)
+    logger.error(f"DCA skipped today after {MAX_RETRIES} failed attempts")
 
 
 def _execute_dca():
@@ -153,15 +171,21 @@ def _execute_dca():
         logger.warning(f"Insufficient balance! Need {DCA_AMOUNT:,.2f} THB but only have {thb_balance:,.2f} THB")
         return
 
-    # Get current BTC price
+    # Get current market price
     ticker = get_ticker()
-    if "THB_BTC" in ticker:
-        current_price = float(ticker["THB_BTC"].get("last", 0))
-        logger.info(f"Current BTC Price: {current_price:,.2f} THB")
+    if ticker:
+        current_price = float(ticker.get("last", 0))
+        logger.info(f"Current {SYMBOL.upper()} Price: {current_price:,.2f} THB")
 
     # Place market buy order
     logger.info(f"Placing market buy order for {DCA_AMOUNT:,.2f} THB...")
-    result = place_market_buy_order(DCA_AMOUNT)
+    try:
+        result = place_market_buy_order(DCA_AMOUNT)
+    except Exception:
+        # The order may have reached the exchange even though the response was
+        # lost — retrying could buy twice, so give up for today
+        logger.exception("Order request failed — not retrying to avoid a double buy")
+        return
 
     if result.get("error", 1) == 0:
         order_result = result.get("result", {})
