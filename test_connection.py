@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_URL = "https://api.bitkub.com"
+REQUEST_TIMEOUT = 15  # seconds
 
 
 def get_signature(api_secret: str, timestamp: int, method: str, path: str, payload: str = "") -> str:
@@ -34,7 +35,7 @@ def test_server_status():
     print("="*50)
 
     try:
-        response = requests.get(f"{BASE_URL}/api/status")
+        response = requests.get(f"{BASE_URL}/api/status", timeout=REQUEST_TIMEOUT)
         data = response.json()
 
         if response.status_code == 200:
@@ -56,7 +57,7 @@ def test_server_time():
     print("="*50)
 
     try:
-        response = requests.get(f"{BASE_URL}/api/v3/servertime")
+        response = requests.get(f"{BASE_URL}/api/v3/servertime", timeout=REQUEST_TIMEOUT)
         data = response.json()
 
         if response.status_code == 200:
@@ -88,7 +89,7 @@ def test_market_ticker():
 
     try:
         # Get all tickers
-        response = requests.get(f"{BASE_URL}/api/v3/market/ticker")
+        response = requests.get(f"{BASE_URL}/api/v3/market/ticker", timeout=REQUEST_TIMEOUT)
         data = response.json()
 
         if response.status_code == 200:
@@ -130,7 +131,7 @@ def test_market_ticker():
 def test_api_key():
     """Test 4: Test API Key with wallet endpoint (secure endpoint)"""
     print("\n" + "="*50)
-    print("Test 4: API Key Authentication (Wallet)")
+    print("Test 4: API Key Authentication (Wallet v4)")
     print("="*50)
 
     api_key = os.getenv("BITKUB_API_KEY")
@@ -147,11 +148,10 @@ def test_api_key():
 
     try:
         timestamp = int(time.time() * 1000)
-        method = "POST"
-        path = "/api/v3/market/wallet"
-        payload = "{}"
+        method = "GET"
+        path = "/api/v4/wallet/balances"
 
-        signature = get_signature(api_secret, timestamp, method, path, payload)
+        signature = get_signature(api_secret, timestamp, method, path)
 
         headers = {
             "Accept": "application/json",
@@ -161,43 +161,25 @@ def test_api_key():
             "X-BTK-SIGN": signature
         }
 
-        response = requests.post(f"{BASE_URL}{path}", headers=headers, json={})
+        response = requests.get(f"{BASE_URL}{path}", headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
 
-        if response.status_code == 200:
-            error_code = data.get("error", 0)
+        if response.status_code == 200 and str(data.get("code")) == "0":
+            print("Status: OK - API Key is valid!")
+            balances = {item["currency"]: float(item["available"]) for item in data.get("data") or []}
 
-            if error_code == 0:
-                print("Status: OK - API Key is valid!")
-                result = data.get("result", {})
+            print("\nWallet Balances (available):")
+            print("-" * 30)
 
-                print("\nWallet Balances:")
-                print("-" * 30)
+            print(f"THB: {balances.get('THB', 0.0):,.2f}")
+            print(f"BTC: {balances.get('BTC', 0.0):.8f}")
 
-                thb_balance = result.get("THB", 0)
-                btc_balance = result.get("BTC", 0)
+            # Show other non-zero balances
+            for currency, balance in balances.items():
+                if currency not in ["THB", "BTC"] and balance > 0:
+                    print(f"{currency}: {balance}")
 
-                print(f"THB: {thb_balance:,.2f}")
-                print(f"BTC: {btc_balance:.8f}")
-
-                # Show other non-zero balances
-                for currency, balance in result.items():
-                    if currency not in ["THB", "BTC"] and balance > 0:
-                        print(f"{currency}: {balance}")
-
-                return True
-            else:
-                error_messages = {
-                    1: "Invalid JSON payload",
-                    2: "Missing API Key",
-                    3: "Invalid API Key",
-                    6: "Missing/Invalid signature",
-                    8: "Invalid timestamp",
-                    52: "Invalid permission (check API key permissions)",
-                }
-                error_msg = error_messages.get(error_code, f"Unknown error code: {error_code}")
-                print(f"Status: FAILED - {error_msg}")
-                return False
+            return True
         else:
             print(f"Status: FAILED (HTTP {response.status_code})")
             print(f"Response: {data}")
@@ -242,7 +224,7 @@ def test_trading_permission():
             "X-BTK-SIGN": signature
         }
 
-        response = requests.get(f"{BASE_URL}{path}?{query}", headers=headers)
+        response = requests.get(f"{BASE_URL}{path}?{query}", headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
 
         error_code = data.get("error", 0)

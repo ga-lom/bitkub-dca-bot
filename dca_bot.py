@@ -22,6 +22,7 @@ API_SECRET = os.getenv("BITKUB_API_SECRET")
 DCA_AMOUNT = float(os.getenv("DCA_AMOUNT_THB", 100))
 DCA_TIME = os.getenv("DCA_TIME", "09:00")
 SYMBOL = os.getenv("SYMBOL", "btc_thb").lower()
+REQUEST_TIMEOUT = (5, 15)  # (connect, read) seconds — no timeout hangs the scheduler forever
 
 # Get script directory for log file
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,23 +62,30 @@ def get_headers(timestamp: int, signature: str) -> dict:
     }
 
 
-def get_wallet_balance() -> dict:
-    """Get wallet balance"""
+def get_wallet_balances() -> dict:
+    """
+    Get available balances as {currency: amount} via GET /api/v4/wallet/balances
+    (POST /api/v3/market/wallet is deprecated). Raises on API error.
+    """
     timestamp = int(time.time() * 1000)
-    method = "POST"
-    path = "/api/v3/market/wallet"
-    payload = "{}"
+    method = "GET"
+    path = "/api/v4/wallet/balances"
 
-    signature = get_signature(timestamp, method, path, payload)
+    signature = get_signature(timestamp, method, path)
     headers = get_headers(timestamp, signature)
 
-    response = requests.post(f"{BASE_URL}{path}", headers=headers, json={})
-    return response.json()
+    response = requests.get(f"{BASE_URL}{path}", headers=headers, timeout=REQUEST_TIMEOUT)
+    data = response.json()
+
+    if str(data.get("code")) != "0":
+        raise RuntimeError(f"Wallet API error: {data}")
+
+    return {item["currency"]: float(item["available"]) for item in data.get("data") or []}
 
 
 def get_ticker() -> dict:
     """Get current ticker price for BTC"""
-    response = requests.get(f"{BASE_URL}/api/v3/market/ticker")
+    response = requests.get(f"{BASE_URL}/api/v3/market/ticker", timeout=REQUEST_TIMEOUT)
     data = response.json()
 
     # Handle list response
@@ -115,11 +123,22 @@ def place_market_buy_order(amount_thb: float) -> dict:
     signature = get_signature(timestamp, method, path, payload)
     headers = get_headers(timestamp, signature)
 
-    response = requests.post(f"{BASE_URL}{path}", headers=headers, data=payload)
+    response = requests.post(f"{BASE_URL}{path}", headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
     return response.json()
 
 
 def execute_dca():
+    """
+    Execute DCA buy order. Must never raise — an exception would propagate
+    through schedule.run_pending() and kill the whole scheduler loop.
+    """
+    try:
+        _execute_dca()
+    except Exception:
+        logger.exception("DCA execution failed")
+
+
+def _execute_dca():
     """Execute DCA buy order"""
     logger.info("="*50)
     logger.info("Starting DCA execution...")
@@ -127,13 +146,7 @@ def execute_dca():
 
     # Check wallet balance
     logger.info("Checking wallet balance...")
-    wallet = get_wallet_balance()
-
-    if wallet.get("error", 1) != 0:
-        logger.error(f"Failed to get wallet balance: {wallet}")
-        return
-
-    thb_balance = wallet.get("result", {}).get("THB", 0)
+    thb_balance = get_wallet_balances().get("THB", 0.0)
     logger.info(f"THB Balance: {thb_balance:,.2f}")
 
     if thb_balance < DCA_AMOUNT:
@@ -223,15 +236,15 @@ def main():
 
     # Test connection first
     print("\nTesting API connection...")
-    wallet = get_wallet_balance()
-
-    if wallet.get("error", 1) != 0:
-        print(f"ERROR: Failed to connect to API: {wallet}")
+    try:
+        balances = get_wallet_balances()
+    except Exception as e:
+        print(f"ERROR: Failed to connect to API: {e}")
         print("Please run test_connection.py first to diagnose the issue.")
         return
 
-    thb_balance = wallet.get("result", {}).get("THB", 0)
-    btc_balance = wallet.get("result", {}).get("BTC", 0)
+    thb_balance = balances.get("THB", 0.0)
+    btc_balance = balances.get("BTC", 0.0)
 
     print(f"API connection successful!")
     print(f"  - THB Balance: {thb_balance:,.2f}")
